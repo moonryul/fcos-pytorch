@@ -100,51 +100,132 @@ class FCOSLoss(nn.Module):
 
         self.cls_loss = SigmoidFocalLoss(gamma, alpha)
         self.box_loss = IOULoss(iou_loss_type)
+        # #MJ: if self.loc_loss_type == 'iou':
+        #     loss = -torch.log(ious)
+
+        # elif self.loc_loss_type == 'giou':
         self.center_loss = nn.BCEWithLogitsLoss()
 
         self.center_sample = center_sample
         self.strides = fpn_strides
         self.radius = pos_radius
 
-    def prepare_target(self, points, targets):
+# labels_batch, box_targets_batch = self.prepare_targets(locations_batch, targets_batch)  
+    def prepare_targets(self, points_batch, targets_batch): # called from labels, box_targets = self.prepare_target(locations, targets)
         ex_size_of_interest = []
 
-        for i, point_per_level in enumerate(points):
-            size_of_interest_per_level = point_per_level.new_tensor(self.sizes[i])
+        for i, points_per_level in enumerate(points_batch): 
+             # points = locations = a  feature map locations for the images in the current batch
+
+            size_of_interest_per_level = points_per_level.new_tensor(self.sizes[i])
             ex_size_of_interest.append(
-                size_of_interest_per_level[None].expand(len(point_per_level), -1)
+                size_of_interest_per_level[None].expand(len(points_per_level), -1)
             )
 
         ex_size_of_interest = torch.cat(ex_size_of_interest, 0)
-        n_point_per_level = [len(point_per_level) for point_per_level in points]
-        point_all = torch.cat(points, dim=0)
-        label, box_target = self.compute_target_for_location(
-            point_all, targets, ex_size_of_interest, n_point_per_level
+        n_points_per_level = [len(points_per_level) for points_per_level in points_batch]
+        point_all_batch = torch.cat(points_batch, dim=0)
+
+        labels_batch, box_targets_batch = self.compute_targets_for_locations(
+            point_all_batch, targets_batch, ex_size_of_interest, n_points_per_level
         )
 
-        for i in range(len(label)):
-            label[i] = torch.split(label[i], n_point_per_level, 0)
-            box_target[i] = torch.split(box_target[i], n_point_per_level, 0)
+        for i in range(len(labels_batch)):
+            labels_batch[i] = torch.split(labels_batch[i], n_points_per_level, 0)
+            box_targets_batch[i] = torch.split(box_targets_batch[i], n_points_per_level, 0)
 
-        label_level_first = []
-        box_target_level_first = []
+        # label_level_first = []
+        # box_target_level_first = []
 
-        for level in range(len(points)):
-            label_level_first.append(
-                torch.cat([label_per_img[level] for label_per_img in label], 0)
+        labels_levels_batch  = []
+        box_targets_levels_batch = []
+
+
+        for level in range(len(points_batch)):  # a list of  feature map points for the images in the current batch
+            labels_levels_batch.append(
+                torch.cat([labels_per_img[level] for labels_per_img in labels_batch], 0)
             )
-            box_target_level_first.append(
+            box_targets_levels_batch.append(
                 torch.cat(
-                    [box_target_per_img[level] for box_target_per_img in box_target], 0
+                    [box_targets_per_img[level] for box_targets_per_img in box_targets_batch], 0
                 )
             )
 
-        return label_level_first, box_target_level_first
+        return labels_levels_batch, box_targets_levels_batch
 
-    def get_sample_region(self, gt, strides, n_point_per_level, xs, ys, radius=1):
-        n_gt = gt.shape[0]
+    
+    # called from   labels, box_targets = self.compute_targets_for_locations(
+        #     point_all, targets, ex_size_of_interest, n_points_per_level
+        # )
+    def compute_targets_for_locations(
+        self, locations_batch, targets_batch, sizes_of_interest, n_point_per_level
+    ):
+        labels = []
+        box_targets = []
+
+        xs, ys = locations_batch[:, 0], locations_batch[:, 1] #here locations is  feature map locations for the images in the current batch
+        
+
+        for i in range(len(targets_batch)):  # Here targets is a set of bbox targets for the images in the current batch
+            targets_per_img = targets_batch[i]
+            assert targets_per_img.mode == 'xyxy'
+
+            bboxes = targets_per_img.box
+
+            labels_per_img = targets_per_img.fields['labels']
+            area = targets_per_img.area()
+
+            # Similar to NumPy you can insert a singleton dimension ("unsqueeze" a dimension) by indexing this dimension with None.
+            # In turn n[:, None] will have the effect of inserting a new dimension on dim=1. This is equivalent to n.unsqueeze(dim=1):
+
+            # bboxes[:, 0] represents bboxes in image i
+            l = xs[:, None] - bboxes[:, 0][None]  #Shape of l = (N,1):  xs[:, None] - bboxes[:, 0][None] =>":" dim refers to the batch size
+            t = ys[:, None] - bboxes[:, 1][None]
+            r = bboxes[:, 2][None] - xs[:, None]
+            b = bboxes[:, 3][None] - ys[:, None]
+
+            box_targets_per_img = torch.stack([l, t, r, b], 2)  # shape of  box_targets_per_img = (N,1,4)
+
+            if self.center_sample: # If the trick of sampling center points is adopted: True by default
+                is_in_boxes = self.get_sample_region(
+                    bboxes, self.strides, n_point_per_level, xs, ys, radius=self.radius
+                )
+
+               # self.get_sample_region  return is_in_boxes, a boolean array
+
+            else:
+                is_in_boxes = box_targets_per_img.min(2)[0] > 0  #MJ:  box_targets_per_img = torch.stack([l, t, r, b], 2):  (N,1,4)
+
+            max_box_targets_per_img = box_targets_per_img.max(2)[0]
+
+            is_cared_in_level = (
+                max_box_targets_per_img >= sizes_of_interest[:, [0]]
+            ) & (max_box_targets_per_img <= sizes_of_interest[:, [1]])
+
+            locations_to_gt_area = area[None].repeat(len(locations_batch), 1)
+
+            locations_to_gt_area[is_in_boxes == 0] = INF
+
+            locations_to_gt_area[is_cared_in_level == 0] = INF
+
+            locations_to_min_area, locations_to_gt_id = locations_to_gt_area.min(1)
+
+            box_targets_per_img = box_targets_per_img[
+                range(len(locations_batch)), locations_to_gt_id
+            ]
+            labels_per_img = labels_per_img[locations_to_gt_id]
+            labels_per_img[locations_to_min_area == INF] = 0
+
+            labels.append(labels_per_img)
+            box_targets.append(box_targets_per_img)
+
+        return labels, box_targets
+
+    def get_sample_region(self, gt_bboxes, strides, n_point_per_level, xs, ys, radius=1): # radius = 1.5 by default
+        n_gt = gt_bboxes.shape[0]
         n_loc = len(xs)
-        gt = gt[None].expand(n_loc, n_gt, 4)
+        gt = gt_bboxes[None].expand(n_loc, n_gt, 4)  # expand the singleton dim of gt_bboxes by n_loc
+        
         center_x = (gt[..., 0] + gt[..., 2]) / 2
         center_y = (gt[..., 1] + gt[..., 3]) / 2
 
@@ -187,60 +268,9 @@ class FCOSLoss(nn.Module):
         center_bbox = torch.stack((left, top, right, bottom), -1)
         is_in_boxes = center_bbox.min(-1)[0] > 0
 
-        return is_in_boxes
+        return is_in_boxes    
 
-    def compute_target_for_location(
-        self, locations, targets, sizes_of_interest, n_point_per_level
-    ):
-        labels = []
-        box_targets = []
-        xs, ys = locations[:, 0], locations[:, 1]
-
-        for i in range(len(targets)):
-            targets_per_img = targets[i]
-            assert targets_per_img.mode == 'xyxy'
-            bboxes = targets_per_img.box
-            labels_per_img = targets_per_img.fields['labels']
-            area = targets_per_img.area()
-
-            l = xs[:, None] - bboxes[:, 0][None]
-            t = ys[:, None] - bboxes[:, 1][None]
-            r = bboxes[:, 2][None] - xs[:, None]
-            b = bboxes[:, 3][None] - ys[:, None]
-
-            box_targets_per_img = torch.stack([l, t, r, b], 2)
-
-            if self.center_sample:
-                is_in_boxes = self.get_sample_region(
-                    bboxes, self.strides, n_point_per_level, xs, ys, radius=self.radius
-                )
-
-            else:
-                is_in_boxes = box_targets_per_img.min(2)[0] > 0
-
-            max_box_targets_per_img = box_targets_per_img.max(2)[0]
-
-            is_cared_in_level = (
-                max_box_targets_per_img >= sizes_of_interest[:, [0]]
-            ) & (max_box_targets_per_img <= sizes_of_interest[:, [1]])
-
-            locations_to_gt_area = area[None].repeat(len(locations), 1)
-            locations_to_gt_area[is_in_boxes == 0] = INF
-            locations_to_gt_area[is_cared_in_level == 0] = INF
-
-            locations_to_min_area, locations_to_gt_id = locations_to_gt_area.min(1)
-
-            box_targets_per_img = box_targets_per_img[
-                range(len(locations)), locations_to_gt_id
-            ]
-            labels_per_img = labels_per_img[locations_to_gt_id]
-            labels_per_img[locations_to_min_area == INF] = 0
-
-            labels.append(labels_per_img)
-            box_targets.append(box_targets_per_img)
-
-        return labels, box_targets
-
+# center_targets = self.compute_centerness_targets(box_targets_flat)
     def compute_centerness_targets(self, box_targets):
         left_right = box_targets[:, [0, 2]]
         top_bottom = box_targets[:, [1, 3]]
@@ -250,11 +280,23 @@ class FCOSLoss(nn.Module):
 
         return torch.sqrt(centerness)
 
-    def forward(self, locations, cls_pred, box_pred, center_pred, targets):
-        batch = cls_pred[0].shape[0]
-        n_class = cls_pred[0].shape[1]
+#  MJ: 
+#       cls_pred_batch, box_pred_batch, center_pred_batch = self.head(features_batch)
+#         # print(cls_pred, box_pred, center_pred)
+#       locations_batch = self.compute_locations(features_batch)
 
-        labels, box_targets = self.prepare_target(locations, targets)
+#       if self.training:
+#             loss_cls, loss_box, loss_center = self.loss(
+#                 locations_batch, cls_pred_batch, box_pred_batch, center_pred_batch, targets_batch
+#             )
+         #self.loss = FCOSLoss.forward():
+    def forward(self, locations_batch, cls_pred_batch, box_pred_batch, center_pred_batch, targets_batch):
+        batch_size = cls_pred_batch[0].shape[0]
+        n_class = cls_pred_batch[0].shape[1]
+
+
+        labels_batch, box_targets_batch = self.prepare_targets(locations_batch, targets_batch)  # locations is  feature map locations for the images in the the batch
+
 
         cls_flat = []
         box_flat = []
@@ -263,13 +305,13 @@ class FCOSLoss(nn.Module):
         labels_flat = []
         box_targets_flat = []
 
-        for i in range(len(labels)):
-            cls_flat.append(cls_pred[i].permute(0, 2, 3, 1).reshape(-1, n_class))
-            box_flat.append(box_pred[i].permute(0, 2, 3, 1).reshape(-1, 4))
-            center_flat.append(center_pred[i].permute(0, 2, 3, 1).reshape(-1))
+        for i in range(len(labels_batch)):
+            cls_flat.append(cls_pred_batch[i].permute(0, 2, 3, 1).reshape(-1, n_class))  #(B,C,H,W) => (B,H,W,C)
+            box_flat.append(box_pred_batch[i].permute(0, 2, 3, 1).reshape(-1, 4))
+            center_flat.append(center_pred_batch[i].permute(0, 2, 3, 1).reshape(-1))
 
-            labels_flat.append(labels[i].reshape(-1))
-            box_targets_flat.append(box_targets[i].reshape(-1, 4))
+            labels_flat.append(labels_batch[i].reshape(-1))
+            box_targets_flat.append(box_targets_batch[i].reshape(-1, 4))
 
         cls_flat = torch.cat(cls_flat, 0)
         box_flat = torch.cat(box_flat, 0)
@@ -280,7 +322,7 @@ class FCOSLoss(nn.Module):
 
         pos_id = torch.nonzero(labels_flat > 0).squeeze(1)
 
-        cls_loss = self.cls_loss(cls_flat, labels_flat.int()) / (pos_id.numel() + batch)
+        cls_loss = self.cls_loss(cls_flat, labels_flat.int()) / (pos_id.numel() + batch_size) # tensor.numel() = the total num of elements
 
         box_flat = box_flat[pos_id]
         center_flat = center_flat[pos_id]

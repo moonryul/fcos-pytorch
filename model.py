@@ -41,14 +41,14 @@ class FPN(nn.Module):
         self.inner_convs = nn.ModuleList()
         self.out_convs = nn.ModuleList()
 
-        for i, in_channel in enumerate(in_channels, 1):
+        for i, in_channel in enumerate(in_channels, 1): # 1 means the index count starts from 1
             if in_channel == 0:
                 self.inner_convs.append(None)
                 self.out_convs.append(None)
 
                 continue
 
-            inner_conv = nn.Conv2d(in_channel, out_channel, 1)
+            inner_conv = nn.Conv2d(in_channel, out_channel, 1)  # 1 x 1 conv
             feat_conv = nn.Conv2d(out_channel, out_channel, 3, padding=1)
 
             self.inner_convs.append(inner_conv)
@@ -59,11 +59,11 @@ class FPN(nn.Module):
         self.top_blocks = top_blocks
 
     def forward(self, inputs):
-        inner = self.inner_convs[-1](inputs[-1])
+        inner = self.inner_convs[-1](inputs[-1])  #(B,H,W,C), inputs[-1] = the top level feature map
         outs = [self.out_convs[-1](inner)]
 
         for feat, inner_conv, out_conv in zip(
-            inputs[:-1][::-1], self.inner_convs[:-1][::-1], self.out_convs[:-1][::-1]
+            inputs[:-1][::-1], self.inner_convs[:-1][::-1], self.out_convs[:-1][::-1]  #[start:end:step]. [::-1]= reverse
         ):
             if inner_conv is None:
                 continue
@@ -196,16 +196,21 @@ class FCOS(nn.Module):
 
         self.apply(freeze_bn)
 
-    def forward(self, input, image_sizes=None, targets=None):
-        features = self.backbone(input)
-        features = self.fpn(features)
-        cls_pred, box_pred, center_pred = self.head(features)
+#MJ: The forward() is called from 
+#   _, loss_dict = model(images_batch.tensors, targets=targets_batch)
+
+    def forward(self, input_batch, image_sizes=None, targets_batch=None): # input is a batch of images; targets is a batch of gt bboxes per image
+        features_batch = self.backbone(input_batch) #  features is a set of  feature maps for the image batch
+        features_batch = self.fpn(features_batch)   # The left features is a  set of feature maps for the image batch
+        cls_pred_batch, box_pred_batch, center_pred_batch = self.head(features_batch)  # features is a set  feature maps for the image batch
         # print(cls_pred, box_pred, center_pred)
-        location = self.compute_location(features)
+        locations_batch = self.compute_locations(features_batch) # locations is a list of feature map locations for the image batch
+
+        #MJ:  locations = torch.stack((shift_x, shift_y), 1) + stride // 2
 
         if self.training:
             loss_cls, loss_box, loss_center = self.loss(
-                location, cls_pred, box_pred, center_pred, targets
+                locations_batch, cls_pred_batch, box_pred_batch, center_pred_batch, targets_batch
             )
             losses = {
                 'loss_cls': loss_cls,
@@ -217,33 +222,34 @@ class FCOS(nn.Module):
 
         else:
             boxes = self.postprocessor(
-                location, cls_pred, box_pred, center_pred, image_sizes
+                locations_batch, cls_pred_batch, box_pred_batch, center_pred_batch, image_sizes
             )
 
             return boxes, None
 
-    def compute_location(self, features):
-        locations = []
+    def compute_locations(self, features_batch):
+        locations_batch = []
 
-        for i, feat in enumerate(features):
-            _, _, height, width = feat.shape
-            location_per_level = self.compute_location_per_level(
-                height, width, self.fpn_strides[i], feat.device
-            )
-            locations.append(location_per_level)
+        for i, feat in enumerate(features_batch):
+            _, _, height_batch, width_batch = feat.shape  # feat is a batch
 
-        return locations
+            locations_per_level = self.compute_locations_per_level(
+                height_batch, width_batch, self.fpn_strides[i], feat.device
+            ) # locations_per_level  is a batch ??
+            locations_batch.append(locations_per_level)
 
-    def compute_location_per_level(self, height, width, stride, device):
+        return locations_batch
+
+    def compute_locations_per_level(self, height_batch, width_batch, stride, device):
         shift_x = torch.arange(
-            0, width * stride, step=stride, dtype=torch.float32, device=device
+            0, width_batch * stride, step=stride, dtype=torch.float32, device=device
         )
         shift_y = torch.arange(
-            0, height * stride, step=stride, dtype=torch.float32, device=device
+            0, height_batch * stride, step=stride, dtype=torch.float32, device=device
         )
         shift_y, shift_x = torch.meshgrid(shift_y, shift_x)
         shift_x = shift_x.reshape(-1)
         shift_y = shift_y.reshape(-1)
-        location = torch.stack((shift_x, shift_y), 1) + stride // 2
+        locations_batch = torch.stack((shift_x, shift_y), 1) + stride // 2
 
-        return location
+        return locations_batch

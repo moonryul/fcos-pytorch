@@ -26,5 +26,10 @@ config.pixel_mean = [0.40789654, 0.44719302, 0.47026115]
 config.pixel_std = [0.28863828, 0.27408164, 0.27809835]
 config.size_divisible = 32
 config.center_sample = True
+
+#MJ: Several other tricks were implemented to improve detection performance. 
+# Center sampling was proposed to only consider locations close to the center of the object as positive, 
+# which greatly improves the mAP score.
+
 config.pos_radius = 1.5
 config.loc_loss_type = 'giou'

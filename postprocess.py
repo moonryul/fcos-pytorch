@@ -3,12 +3,19 @@ from torch import nn
 
 from boxlist import BoxList, boxlist_nms, remove_small_box, cat_boxlist
 
-
+# #MJ: self.postprocessor = FCOSPostprocessor(
+#             config.threshold,
+#             config.top_n,
+#             config.nms_threshold,
+#             config.post_top_n,
+#             config.min_size,
+#             config.n_class,
+#         )\
 class FCOSPostprocessor(nn.Module):
     def __init__(self, threshold, top_n, nms_threshold, post_top_n, min_size, n_class):
         super().__init__()
 
-        self.threshold = threshold
+        self.threshold = threshold  # localization quality score (classification score, e.g.)
         self.top_n = top_n
         self.nms_threshold = nms_threshold
         self.post_top_n = post_top_n
@@ -93,7 +100,9 @@ class FCOSPostprocessor(nn.Module):
 
         boxlists = list(zip(*boxes))
         boxlists = [cat_boxlist(boxlist) for boxlist in boxlists]
+
         boxlists = self.select_over_scales(boxlists)
+        
 
         return boxlists
 

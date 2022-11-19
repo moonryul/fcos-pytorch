@@ -89,7 +89,7 @@ def train(args, epoch, loader, model, optimizer, device):
         images_batch = images_batch.to(device)
         targets_batch = [target.to(device) for target in targets_batch]
 
-        _, loss_dict = model(images_batch.tensors, targets_batch=targets_batch)
+        _, loss_dict = model( images_batch.tensors, targets_batch=targets_batch )
         loss_cls = loss_dict['loss_cls'].mean()
         loss_box = loss_dict['loss_box'].mean()
         loss_center = loss_dict['loss_center'].mean()

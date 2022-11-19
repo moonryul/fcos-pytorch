@@ -35,7 +35,12 @@ def init_conv_std(module, std=0.01):
 
 
 class FPN(nn.Module):
-    def __init__(self, in_channels, out_channel, top_blocks=None):
+    def __init__(self, in_channels, out_channel, top_blocks=None): 
+        #  fpn_top = FPNTopP6P7(
+        #    config.feat_channels[-1], config.out_channel, use_p5=config.use_p5
+        # )
+        #self.fpn = FPN(config.feat_channels, config.out_channel, fpn_top)
+        
         super().__init__()
 
         self.inner_convs = nn.ModuleList()
@@ -200,17 +205,21 @@ class FCOS(nn.Module):
 #   _, loss_dict = model(images_batch.tensors, targets=targets_batch)
 
     def forward(self, input_batch, image_sizes=None, targets_batch=None): # input is a batch of images; targets is a batch of gt bboxes per image
-        features_batch = self.backbone(input_batch) #  features is a set of  feature maps for the image batch
-        features_batch = self.fpn(features_batch)   # The left features is a  set of feature maps for the image batch
-        cls_pred_batch, box_pred_batch, center_pred_batch = self.head(features_batch)  # features is a set  feature maps for the image batch
+
+        feature_maps_batch = self.backbone(input_batch) #  features is a set of  feature maps for the image batch
+        feature_maps_batch_after_fpn = self.fpn(feature_maps_batch)   # Tself.fpn() uses the last sample of features to create a pyramid of feature maps
+
+        cls_pred_batch, box_pred_batch, center_pred_batch = self.head(feature_maps_batch_after_fpn)  # features is a set  feature maps for the image batch
+        #  cls_pred_batch[i] = the output of the classification head for feature map i.
+
         # print(cls_pred, box_pred, center_pred)
-        locations_batch = self.compute_locations(features_batch) # locations is a list of feature map locations for the image batch
+        locations = self.compute_locations( feature_maps_batch_after_fpn) # locations is a list of feature map locations for the image batch
 
         #MJ:  locations = torch.stack((shift_x, shift_y), 1) + stride // 2
 
         if self.training:
             loss_cls, loss_box, loss_center = self.loss(
-                locations_batch, cls_pred_batch, box_pred_batch, center_pred_batch, targets_batch
+                locations, cls_pred_batch, box_pred_batch, center_pred_batch, targets_batch
             )
             losses = {
                 'loss_cls': loss_cls,
@@ -222,23 +231,24 @@ class FCOS(nn.Module):
 
         else:
             boxes = self.postprocessor(
-                locations_batch, cls_pred_batch, box_pred_batch, center_pred_batch, image_sizes
+                locations, cls_pred_batch, box_pred_batch, center_pred_batch, image_sizes
             )
 
             return boxes, None
 
-    def compute_locations(self, features_batch):
-        locations_batch = []
+    def compute_locations(self, features):
+        locations = []
 
-        for i, feat in enumerate(features_batch):
-            _, _, height_batch, width_batch = feat.shape  # feat is a batch
+        for i, feat in enumerate(features):
+
+            _, _, height, width = feat.shape  # feat is a batch: Here we use only the shape of each feature map
 
             locations_per_level = self.compute_locations_per_level(
-                height_batch, width_batch, self.fpn_strides[i], feat.device
+                height, width, self.fpn_strides[i], feat.device
             ) # locations_per_level  is a batch ??
-            locations_batch.append(locations_per_level)
+            locations.append(locations_per_level)
 
-        return locations_batch
+        return locations
 
     def compute_locations_per_level(self, height_batch, width_batch, stride, device):
         shift_x = torch.arange(
